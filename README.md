@@ -1,0 +1,1 @@
+# obsidian-smart-merger-plugin
