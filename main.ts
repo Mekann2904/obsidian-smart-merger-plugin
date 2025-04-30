@@ -1,6 +1,6 @@
 import { App, Plugin, Notice, Modal, Setting, TextAreaComponent } from 'obsidian';
 
-// モーダル: 指定リンク入力用（UI改善版）
+// モーダル: 指定リンク入力用（UI改善版 + 記法拡張）
 class LinkInputModal extends Modal {
   private onSubmit: (fileNames: string[]) => void;
   private textareaEl: TextAreaComponent;
@@ -12,30 +12,26 @@ class LinkInputModal extends Modal {
 
   onOpen() {
     const { titleEl, contentEl } = this;
-    // ヘッダー
     titleEl.setText('まとめたいノートのリンクを入力');
     titleEl.style.marginBottom = '8px';
 
-    // 説明テキスト
     contentEl.createEl('p', {
-      text: '例: [[NoteA]] [[Folder/NoteB]] をスペース区切りで複数指定できます',
+      text: '例: [[NoteA]] [NoteB](Folder/NoteB) [リンクテキスト](app://obsidian.md/パス) をスペース区切りで複数指定できます',
       cls: 'setting-item-description'
     });
 
-    // テキストエリア
     const setting = new Setting(contentEl)
       .setName('リンク入力')
-      .setDesc('[[ファイル名]] を複数指定')
+      .setDesc('[[ファイル名]] または [テキスト](ファイルパス／app://obsidian.md/相対パス) を複数指定')
       .addTextArea(text => {
         this.textareaEl = text;
-        text.setPlaceholder('[[ファイル名]] を指定');
+        text.setPlaceholder('[[ファイル名]] や [テキスト](ファイルパス) を指定');
         text.inputEl.style.width = '100%';
         text.inputEl.style.minHeight = '80px';
         text.inputEl.style.resize = 'vertical';
         text.inputEl.style.padding = '4px';
       });
 
-    // ボタン行
     const btnSetting = new Setting(contentEl);
     btnSetting.controlEl.style.display = 'flex';
     btnSetting.controlEl.style.justifyContent = 'flex-end';
@@ -55,17 +51,38 @@ class LinkInputModal extends Modal {
          .onClick(() => {
            const raw = this.textareaEl.getValue() || '';
            const names: string[] = [];
-           const re = /\[\[([^\]]+)\]\]/g;
-           let match: RegExpExecArray | null;
-           while ((match = re.exec(raw)) !== null) {
-             names.push(match[1].trim());
+
+           // Wikiリンク抽出
+           const wikiRe = /\[\[([^\]]+)\]\]/g;
+           let wikiMatch: RegExpExecArray | null;
+           while ((wikiMatch = wikiRe.exec(raw)) !== null) {
+             names.push(wikiMatch[1].trim());
            }
-           if (names.length === 0) {
+
+           // Markdownリンク抽出
+           const mdRe = /\[([^\]]+)\]\(([^)]+)\)/g;
+           let mdMatch: RegExpExecArray | null;
+           while ((mdMatch = mdRe.exec(raw)) !== null) {
+             let target = mdMatch[2].trim();
+             // app://obsidian.md/ プレフィックスを除去
+             if (target.startsWith('app://obsidian.md/')) {
+               target = target.replace('app://obsidian.md/', '');
+             }
+             // URI デコード
+             try {
+               target = decodeURIComponent(target);
+             } catch {}
+             names.push(target);
+           }
+
+           // 重複排除
+           const uniqueNames = Array.from(new Set(names));
+           if (uniqueNames.length === 0) {
              new Notice('リンクが検出されませんでした。');
              return;
            }
            this.close();
-           this.onSubmit(names);
+           this.onSubmit(uniqueNames);
          });
     });
   }
@@ -115,9 +132,17 @@ export default class SmartMergerPlugin extends Plugin {
           statusBarItem.setText(`[${i+1}/${totalFiles}] ${file.basename} を処理中...`);
           try {
             const content = await this.app.vault.read(file);
-            mergedContent += `\n\n## ${file.basename}\n\n${content}`;
+            mergedContent += `
+
+## ${file.basename}
+
+${content}`;
           } catch {
-            mergedContent += `\n\n## ${file.basename} (読み込みエラー)\n\n`;
+            mergedContent += `
+
+## ${file.basename} (読み込みエラー)
+
+`;
           }
           if (mergedContent.length >= MAX_CONTENT_LENGTH) {
             await flushContent(mergedContent, partCounter++);
@@ -178,9 +203,17 @@ export default class SmartMergerPlugin extends Plugin {
             statusBarItem.setText(`[${i+1}/${targetFiles.length}] ${file.basename} を処理中...`);
             try {
               const txt = await this.app.vault.read(file);
-              merged += `\n\n## ${file.basename}\n\n${txt}`;
+              merged += `
+
+## ${file.basename}
+
+${txt}`;
             } catch {
-              merged += `\n\n## ${file.basename} (読み込みエラー)\n\n`;
+              merged += `
+
+## ${file.basename} (読み込みエラー)
+
+`;
             }
             if (merged.length >= MAX_CONTENT_LENGTH) {
               await flush(merged, part++);
