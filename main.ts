@@ -1,4 +1,15 @@
-import { App, Plugin, Notice, Modal, Setting, TextAreaComponent } from 'obsidian';
+import { App, Plugin, Notice, Modal, Setting, TextAreaComponent, PluginSettingTab } from 'obsidian';
+
+// 設定インターフェース
+interface SmartMergerSettings {
+  outputDestination: 'vault' | 'external' | 'both';
+  externalDir: string; // 絶対パス推奨（デスクトップ版のみ）
+}
+
+const DEFAULT_SETTINGS: SmartMergerSettings = {
+  outputDestination: 'vault',
+  externalDir: ''
+};
 
 // モーダル: 指定リンク入力用（UI改善版 + 記法拡張）
 class LinkInputModal extends Modal {
@@ -92,9 +103,96 @@ class LinkInputModal extends Modal {
   }
 }
 
+class SmartMergerSettingTab extends PluginSettingTab {
+  plugin: SmartMergerPlugin;
+
+  constructor(app: App, plugin: SmartMergerPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    containerEl.createEl('h2', { text: 'SmartMerger 設定' });
+
+    new Setting(containerEl)
+      .setName('出力先')
+      .setDesc('Vault 内、外部フォルダ、または両方に出力します（外部はデスクトップ版のみ）。')
+      .addDropdown(dd => {
+        dd.addOption('vault', 'Vault 内');
+        dd.addOption('external', '外部フォルダ');
+        dd.addOption('both', '両方');
+        dd.setValue(this.plugin.settings.outputDestination);
+        dd.onChange(async (value: 'vault' | 'external' | 'both') => {
+          this.plugin.settings.outputDestination = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName('外部出力フォルダ')
+      .setDesc('絶対パス推奨。例: /Users/you/Exports（デスクトップ版のみ）。')
+      .addText(text => {
+        text.setPlaceholder('/absolute/path/to/output')
+          .setValue(this.plugin.settings.externalDir)
+          .onChange(async (val) => {
+            this.plugin.settings.externalDir = val.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+  }
+}
+
 export default class SmartMergerPlugin extends Plugin {
+  settings: SmartMergerSettings;
+
+  private getFs() {
+    const anyWindow = (window as any);
+    const requireFn = anyWindow?.require;
+    try {
+      if (!requireFn) return { fs: null as any, path: null as any };
+      const fs = requireFn('fs');
+      const path = requireFn('path');
+      return { fs, path };
+    } catch (_e) {
+      return { fs: null as any, path: null as any };
+    }
+  }
+
+  private writeExternalFile = async (fileName: string, content: string) => {
+    const { fs, path } = this.getFs();
+    if (!fs || !path) {
+      new Notice('外部出力はデスクトップ版でのみ利用できます。');
+      return;
+    }
+    const dir = (this.settings.externalDir || '').trim();
+    if (!dir) {
+      new Notice('外部出力フォルダが設定されていません。設定から指定してください。');
+      return;
+    }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = path.extname(fileName);
+      const baseName = fileName.slice(0, fileName.length - ext.length);
+      let target = path.join(dir, fileName);
+      let i = 1;
+      while (fs.existsSync(target) && i < 1000) {
+        target = path.join(dir, `${baseName}(${i++})${ext}`);
+      }
+      fs.writeFileSync(target, content, 'utf8');
+      new Notice(`外部に出力しました: ${target}`);
+    } catch (e) {
+      console.error(e);
+      new Notice('外部出力に失敗しました。権限やパスを確認してください。');
+    }
+  };
+
   async onload() {
     console.log('Loading SmartMergerPlugin');
+    await this.loadSettings();
+    this.addSettingTab(new SmartMergerSettingTab(this.app, this));
 
     // コマンド1: 全Markdownファイルをマージ
     this.addCommand({
@@ -118,12 +216,20 @@ export default class SmartMergerPlugin extends Plugin {
 
         const flushContent = async (content: string, part: number) => {
           const outputFileName = `${pluginName}_${formattedDate}_part${part}.md`;
-          try {
-            await this.app.vault.create(outputFileName, content);
-            new Notice(`Created ${outputFileName}`);
-          } catch (error) {
-            console.error(error);
-            new Notice('ファイル作成中にエラーが発生しました。');
+          const dest = this.settings.outputDestination;
+          const writeToVault = dest === 'vault' || dest === 'both';
+          const writeToExternal = dest === 'external' || dest === 'both';
+          if (writeToVault) {
+            try {
+              await this.app.vault.create(outputFileName, content);
+              new Notice(`Created ${outputFileName}`);
+            } catch (error) {
+              console.error(error);
+              new Notice('Vault へのファイル作成中にエラーが発生しました。');
+            }
+          }
+          if (writeToExternal) {
+            await this.writeExternalFile(outputFileName, content);
           }
         };
 
@@ -189,12 +295,20 @@ ${content}`;
 
           const flush = async (content: string, idx: number) => {
             const name = `${pluginName}_${formattedDate}_part${idx}.md`;
-            try {
-              await this.app.vault.create(name, content);
-              new Notice(`Created ${name}`);
-            } catch (e) {
-              console.error(e);
-              new Notice('ファイル作成中にエラーが発生しました。');
+            const dest = this.settings.outputDestination;
+            const writeToVault = dest === 'vault' || dest === 'both';
+            const writeToExternal = dest === 'external' || dest === 'both';
+            if (writeToVault) {
+              try {
+                await this.app.vault.create(name, content);
+                new Notice(`Created ${name}`);
+              } catch (e) {
+                console.error(e);
+                new Notice('Vault へのファイル作成中にエラーが発生しました。');
+              }
+            }
+            if (writeToExternal) {
+              await this.writeExternalFile(name, content);
             }
           };
 
@@ -234,5 +348,13 @@ ${txt}`;
 
   onunload() {
     console.log('Unloading SmartMergerPlugin');
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
   }
 }
